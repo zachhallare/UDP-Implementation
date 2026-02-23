@@ -5,7 +5,7 @@
 **Document Title:** RUDP File Transfer Protocol Specification  
 **Version:** 1.0  
 **Date:** February 2025  
-**Authors:** Zach Hallare  
+**Authors:** Zach Hallare & Nathan Laborada
 
 ---
 

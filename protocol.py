@@ -32,7 +32,7 @@ MAX_RETRIES      = 5               # Max retransmissions before giving up
 SERVER_FILES_DIR = "server_files"  # Directory for server-side files
 
 # Simulated packet loss (for testing retransmission)
-SIMULATE_LOSS    = False           # Set True to randomly drop packets
+SIMULATE_LOSS    = True           # Set True to randomly drop packets
 LOSS_PROBABILITY = 0.3             # Drop probability (0.0 - 1.0)
 
 # Shared secret key for encryption and authentication.
