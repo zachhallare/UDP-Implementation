@@ -1,1 +1,0 @@
-Hello, this is a test file for the RUDP protocol. It contains multiple lines of text to verify that file transfer works correctly over our reliable UDP implementation.

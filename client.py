@@ -9,67 +9,75 @@ data packets, acknowledgements, retransmission, and clean termination.
 Usage:
     python client.py
 
-The client connects to the server configured in config.py and presents
-an interactive command-line menu.
+@author Zach Hallare
+@version 1.0
+@since February 2025
 """
 
 import os
 import sys
 import socket
 import time
-
-from config import (
-    SERVER_HOST, SERVER_PORT, CHUNK_SIZE, TIMEOUT, MAX_RETRIES,
-    SIMULATE_LOSS, LOSS_PROBABILITY,
-)
-from protocol import (
-    HEADER_SIZE,
-    MSG_SYN, MSG_SYN_ACK, MSG_ACK, MSG_DATA, MSG_FIN, MSG_FIN_ACK, MSG_ERROR,
-    pack_packet, unpack_packet, msg_name,
-    ChecksumError, MalformedPacketError,
-)
-
 import random
 
+from protocol import (
+    # Config constants
+    SERVER_HOST, SERVER_PORT, CHUNK_SIZE, TIMEOUT, MAX_RETRIES,
+    SIMULATE_LOSS, LOSS_PROBABILITY,
+    # Protocol constants and functions
+    HEADER_SIZE, HMAC_SIZE,
+    MSG_SYN, MSG_SYN_ACK, MSG_ACK, MSG_DATA, MSG_FIN, MSG_FIN_ACK, MSG_ERROR,
+    pack_packet, unpack_packet, msg_name,
+    ChecksumError, MalformedPacketError, AuthenticationError,
+)
 
-# --- Logging Helpers --------------------------------------------------
-def log(msg: str) -> None:
-    """Print a timestamped log message."""
+# Maximum receive buffer size (header + payload + HMAC + margin)
+RECV_BUF = HEADER_SIZE + CHUNK_SIZE + HMAC_SIZE + 256
+
+
+# ===================================================================
+# Logging Helpers
+# ===================================================================
+
+def log(msg):
+    """
+    Print a timestamped log message prefixed with [CLIENT].
+
+    @param msg: string message to log
+    """
     ts = time.strftime("%H:%M:%S")
     print(f"[CLIENT {ts}] {msg}")
 
 
-def should_drop() -> bool:
-    """Return True if this packet should be simulated as lost."""
-    if SIMULATE_LOSS:
-        if random.random() < LOSS_PROBABILITY:
-            return True
+def should_drop():
+    """
+    Determine if a packet should be simulated as lost.
+    Used for testing retransmission behavior.
+
+    @return: True if the packet should be dropped, False otherwise
+    """
+    if SIMULATE_LOSS and random.random() < LOSS_PROBABILITY:
+        return True
     return False
 
 
-# --- Session Handshake ------------------------------------------------
-def perform_handshake(sock: socket.socket, server_addr: tuple,
-                      command: str) -> int:
+# ===================================================================
+# Session Handshake
+# ===================================================================
+
+def perform_handshake(sock, server_addr, command):
     """
     Perform a three-way handshake with the server:
-      Client -> SYN (with command)
-      Server -> SYN-ACK (with session params)
+      Client -> SYN (with command string)
+      Server -> SYN-ACK (with session parameters)
       Client -> ACK
 
-    Parameters
-    ----------
-    sock        : UDP socket
-    server_addr : (host, port) of the server
-    command     : e.g. "DOWNLOAD:test.txt" or "UPLOAD:test.txt"
-
-    Returns
-    -------
-    int : The session_id assigned by the server.
-
-    Raises
-    ------
-    TimeoutError : if handshake fails after MAX_RETRIES.
-    ConnectionError : if server responds with an ERROR.
+    @param sock: UDP socket object
+    @param server_addr: tuple (host, port) of the server
+    @param command: string command, e.g. "DOWNLOAD:test.txt" or "UPLOAD:test.txt"
+    @return: integer session_id assigned by the server
+    @raises TimeoutError: if handshake fails after MAX_RETRIES attempts
+    @raises ConnectionError: if the server responds with an ERROR packet
     """
     syn_payload = command.encode("utf-8")
     syn_pkt = pack_packet(MSG_SYN, 0, 0, syn_payload)
@@ -81,7 +89,7 @@ def perform_handshake(sock: socket.socket, server_addr: tuple,
         log(f"-> Sent SYN: \"{command}\" (attempt {attempt}/{MAX_RETRIES})")
 
         try:
-            data, addr = sock.recvfrom(HEADER_SIZE + CHUNK_SIZE + 256)
+            data, addr = sock.recvfrom(RECV_BUF)
         except socket.timeout:
             log(f"[..] Timeout waiting for SYN-ACK (attempt {attempt})")
             continue
@@ -92,7 +100,7 @@ def perform_handshake(sock: socket.socket, server_addr: tuple,
 
         try:
             r_type, r_sid, r_seq, r_payload = unpack_packet(data)
-        except (ChecksumError, MalformedPacketError) as e:
+        except (ChecksumError, MalformedPacketError, AuthenticationError) as e:
             log(f"[!] Bad packet: {e}")
             continue
 
@@ -105,7 +113,7 @@ def perform_handshake(sock: socket.socket, server_addr: tuple,
             params = r_payload.decode("utf-8", errors="replace")
             log(f"<- Received SYN-ACK (session={session_id}, params={params})")
 
-            # Send ACK to complete handshake
+            # Send ACK to complete the three-way handshake
             ack_pkt = pack_packet(MSG_ACK, session_id, 0)
             sock.sendto(ack_pkt, server_addr)
             log(f"-> Sent ACK – handshake complete!")
@@ -116,22 +124,29 @@ def perform_handshake(sock: socket.socket, server_addr: tuple,
     raise TimeoutError("Handshake failed: no SYN-ACK received")
 
 
-# --- Download File ----------------------------------------------------
-def download_file(sock: socket.socket, server_addr: tuple,
-                  session_id: int, filename: str) -> None:
+# ===================================================================
+# Download File
+# ===================================================================
+
+def download_file(sock, server_addr, session_id, filename):
     """
     Receive a file from the server. Expects sequenced DATA packets,
-    sends ACK for each. Empty DATA payload signals EOF. Reassembles
-    data in sequence-number order and saves to local disk.
+    sends ACK for each one. An empty DATA payload signals EOF.
+    Reassembles data in sequence-number order and saves to local disk.
+
+    @param sock: UDP socket object
+    @param server_addr: tuple (host, port) of the server
+    @param session_id: 32-bit unsigned session identifier
+    @param filename: string name to save the downloaded file as
     """
     log(f"[DL] Downloading: {filename}")
 
-    received_data = {}   # seq_num -> payload
+    received_data = {}   # seq_num -> payload bytes
     expected_seq = 0
 
     while True:
         try:
-            data, addr = sock.recvfrom(HEADER_SIZE + CHUNK_SIZE + 256)
+            data, addr = sock.recvfrom(RECV_BUF)
         except socket.timeout:
             log(f"[..] Timeout waiting for DATA (expected seq={expected_seq})")
             continue
@@ -142,7 +157,7 @@ def download_file(sock: socket.socket, server_addr: tuple,
 
         try:
             r_type, r_sid, r_seq, r_payload = unpack_packet(data)
-        except (ChecksumError, MalformedPacketError) as e:
+        except (ChecksumError, MalformedPacketError, AuthenticationError) as e:
             log(f"[!] Bad packet: {e}")
             continue
 
@@ -157,10 +172,9 @@ def download_file(sock: socket.socket, server_addr: tuple,
             return
 
         if r_type == MSG_DATA:
-            # Empty payload = EOF
+            # Empty payload = EOF signal
             if len(r_payload) == 0:
                 log(f"[EOF] Received EOF signal (seq={r_seq})")
-                # Send ACK for EOF
                 ack_pkt = pack_packet(MSG_ACK, session_id, r_seq)
                 sock.sendto(ack_pkt, server_addr)
                 log(f"-> Sent ACK for EOF seq={r_seq}")
@@ -168,10 +182,10 @@ def download_file(sock: socket.socket, server_addr: tuple,
 
             log(f"<- Received DATA seq={r_seq} ({len(r_payload)} bytes)")
 
-            # Store data
+            # Store the received data indexed by sequence number
             received_data[r_seq] = r_payload
 
-            # Send ACK
+            # Send ACK for the received packet
             ack_pkt = pack_packet(MSG_ACK, session_id, r_seq)
             sock.sendto(ack_pkt, server_addr)
             log(f"-> Sent ACK for seq={r_seq}")
@@ -181,24 +195,31 @@ def download_file(sock: socket.socket, server_addr: tuple,
         else:
             log(f"[!] Unexpected {msg_name(r_type)} during download")
 
-    # Reassemble file in order
+    # Reassemble file in ascending sequence order
     file_bytes = b""
     for seq in sorted(received_data.keys()):
         file_bytes += received_data[seq]
 
-    # Save file locally
+    # Save the reassembled file to local disk
     with open(filename, "wb") as f:
         f.write(file_bytes)
 
     log(f"[OK] File saved: {filename} ({len(file_bytes)} bytes)")
 
 
-# --- Upload File ------------------------------------------------------
-def upload_file(sock: socket.socket, server_addr: tuple,
-                session_id: int, filename: str) -> None:
+# ===================================================================
+# Upload File
+# ===================================================================
+
+def upload_file(sock, server_addr, session_id, filename):
     """
     Send a local file to the server using sequenced DATA packets with
-    stop-and-wait ARQ. Sends an empty DATA packet as EOF signal.
+    stop-and-wait ARQ. Sends an empty DATA packet as the EOF signal.
+
+    @param sock: UDP socket object
+    @param server_addr: tuple (host, port) of the server
+    @param session_id: 32-bit unsigned session identifier
+    @param filename: string path of the local file to upload
     """
     if not os.path.isfile(filename):
         log(f"[ERR] Local file not found: {filename}")
@@ -224,7 +245,7 @@ def upload_file(sock: socket.socket, server_addr: tuple,
                 f"(attempt {attempt}/{MAX_RETRIES})")
 
             try:
-                data, addr = sock.recvfrom(HEADER_SIZE + CHUNK_SIZE + 256)
+                data, addr = sock.recvfrom(RECV_BUF)
             except socket.timeout:
                 log(f"[..] Timeout waiting for ACK seq={seq_num} "
                     f"(attempt {attempt})")
@@ -236,7 +257,8 @@ def upload_file(sock: socket.socket, server_addr: tuple,
 
             try:
                 r_type, r_sid, r_seq, r_payload = unpack_packet(data)
-            except (ChecksumError, MalformedPacketError) as e:
+            except (ChecksumError, MalformedPacketError,
+                    AuthenticationError) as e:
                 log(f"[!] Bad packet: {e}")
                 continue
 
@@ -258,7 +280,7 @@ def upload_file(sock: socket.socket, server_addr: tuple,
         seq_num += 1
         offset += CHUNK_SIZE
 
-    # Send empty DATA to signal EOF
+    # Send empty DATA packet to signal EOF
     eof_pkt = pack_packet(MSG_DATA, session_id, seq_num, b"")
     for attempt in range(1, MAX_RETRIES + 1):
         sock.sendto(eof_pkt, server_addr)
@@ -266,7 +288,7 @@ def upload_file(sock: socket.socket, server_addr: tuple,
             f"(attempt {attempt}/{MAX_RETRIES})")
 
         try:
-            data, addr = sock.recvfrom(HEADER_SIZE + CHUNK_SIZE + 256)
+            data, addr = sock.recvfrom(RECV_BUF)
         except socket.timeout:
             log(f"[..] Timeout waiting for ACK on EOF (attempt {attempt})")
             continue
@@ -277,7 +299,7 @@ def upload_file(sock: socket.socket, server_addr: tuple,
 
         try:
             r_type, r_sid, r_seq, r_payload = unpack_packet(data)
-        except (ChecksumError, MalformedPacketError):
+        except (ChecksumError, MalformedPacketError, AuthenticationError):
             continue
 
         if r_type == MSG_ACK and r_seq == seq_num:
@@ -287,13 +309,18 @@ def upload_file(sock: socket.socket, server_addr: tuple,
     log(f"[OK] Upload complete: {filename}")
 
 
-# --- Session Termination ---------------------------------------------
-def perform_termination(sock: socket.socket, server_addr: tuple,
-                        session_id: int) -> None:
+# ===================================================================
+# Session Termination
+# ===================================================================
+
+def perform_termination(sock, server_addr, session_id):
     """
-    Initiate clean session termination:
-      Client -> FIN
-      Server -> FIN-ACK
+    Initiate clean session termination by sending FIN and
+    waiting for the server's FIN-ACK response.
+
+    @param sock: UDP socket object
+    @param server_addr: tuple (host, port) of the server
+    @param session_id: 32-bit unsigned session identifier
     """
     fin_pkt = pack_packet(MSG_FIN, session_id, 0)
 
@@ -302,7 +329,7 @@ def perform_termination(sock: socket.socket, server_addr: tuple,
         log(f"-> Sent FIN (attempt {attempt}/{MAX_RETRIES})")
 
         try:
-            data, addr = sock.recvfrom(HEADER_SIZE + CHUNK_SIZE + 256)
+            data, addr = sock.recvfrom(RECV_BUF)
         except socket.timeout:
             log(f"[..] Timeout waiting for FIN-ACK (attempt {attempt})")
             continue
@@ -313,7 +340,7 @@ def perform_termination(sock: socket.socket, server_addr: tuple,
 
         try:
             r_type, r_sid, r_seq, r_payload = unpack_packet(data)
-        except (ChecksumError, MalformedPacketError) as e:
+        except (ChecksumError, MalformedPacketError, AuthenticationError) as e:
             log(f"[!] Bad packet: {e}")
             continue
 
@@ -326,10 +353,15 @@ def perform_termination(sock: socket.socket, server_addr: tuple,
     log(f"[!] FIN-ACK not received, forcing session close")
 
 
-# --- Main Client Loop ------------------------------------------------
-def main():
-    """Interactive client for the RUDP file transfer protocol."""
+# ===================================================================
+# Main Client Loop
+# ===================================================================
 
+def main():
+    """
+    Interactive command-line client for the RUDP file transfer protocol.
+    Connects to the server and presents a menu for download, upload, and exit.
+    """
     server_addr = (SERVER_HOST, SERVER_PORT)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(TIMEOUT)
@@ -337,6 +369,7 @@ def main():
     log(f"RUDP Client ready. Server: {SERVER_HOST}:{SERVER_PORT}")
     if SIMULATE_LOSS:
         log(f"[!] Simulated loss ENABLED (probability={LOSS_PROBABILITY})")
+    log("Encryption: XOR  |  Authentication: HMAC-SHA256")
 
     print("\nCommands:")
     print("  download <filename>  - Download a file from the server")
@@ -370,13 +403,13 @@ def main():
             if cmd == "download":
                 command_str = f"DOWNLOAD:{filename}"
             else:
-                # For upload, verify local file exists first
+                # Verify local file exists before attempting upload
                 if not os.path.isfile(filename):
                     log(f"[ERR] Local file not found: {filename}")
                     continue
                 command_str = f"UPLOAD:{os.path.basename(filename)}"
 
-            # -- Handshake -----------------------------------------
+            # Perform three-way handshake with the server
             try:
                 session_id = perform_handshake(sock, server_addr, command_str)
             except TimeoutError as e:
@@ -388,7 +421,7 @@ def main():
 
             print()
 
-            # -- File Transfer -------------------------------------
+            # Execute the file transfer operation
             try:
                 if cmd == "download":
                     download_file(sock, server_addr, session_id, filename)
@@ -399,7 +432,7 @@ def main():
 
             print()
 
-            # -- Termination ---------------------------------------
+            # Perform clean session termination
             perform_termination(sock, server_addr, session_id)
             print()
         else:
