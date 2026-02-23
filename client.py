@@ -9,7 +9,7 @@ data packets, acknowledgements, retransmission, and clean termination.
 Usage:
     python client.py
 
-@author Zach Hallare
+@authors Zach Hallare & Nathan Laborada
 @version 1.0
 @since February 2025
 """

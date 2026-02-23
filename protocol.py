@@ -11,7 +11,7 @@ Header Layout (13 bytes total):
   |  1 byte  |  4 bytes   | 4 bytes  |   2 bytes   | 2 bytes  |
   +----------+------------+----------+-------------+----------+
 
-@author Zach Hallare
+@authors Zach Hallare & Nathan Laborada 
 @version 1.0
 @since February 2025
 """
