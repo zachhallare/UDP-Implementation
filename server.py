@@ -9,8 +9,7 @@ packets, acknowledgements, retransmission handling, and clean termination.
 Usage:
     python server.py
 
-@author Zach Hallare & Nathan Laborada
-@version 1.0
+@author Zach Benedict Hallare & Nathan Laborada
 @since February 2025
 """
 

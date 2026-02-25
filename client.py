@@ -9,8 +9,7 @@ data packets, acknowledgements, retransmission, and clean termination.
 Usage:
     python client.py
 
-@authors Zach Hallare & Nathan Laborada
-@version 1.0
+@authors Zach Benedict Hallare & Nathan Laborada
 @since February 2025
 """
 
